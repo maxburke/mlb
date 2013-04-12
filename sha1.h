@@ -4,8 +4,8 @@
  * This module provides a SHA1 hash that works on buffers or on strings.
  */
 
-#ifndef MLB_SHA1_C
-#define MLB_SHA1_C
+#ifndef MLB_SHA1_H
+#define MLB_SHA1_H
 
 #include <stdint.h>
 
