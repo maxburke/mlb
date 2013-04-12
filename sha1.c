@@ -250,6 +250,6 @@ sha1_hash_buffer(const void *data, size_t length)
 struct sha1_hash_t
 sha1_hash_string(const char *string)
 {
-    return hash_buffer(string, strlen(string));
+    return sha1_hash_buffer(string, strlen(string));
 }
 
