@@ -1,5 +1,5 @@
 /*
- * sha1.h / 2012 Max Burke / Public Domain
+ * sha1.h / 2013 Max Burke / Public Domain
  *
  * This module provides a SHA1 hash that works on buffers or on strings.
  */
