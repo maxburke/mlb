@@ -1,5 +1,5 @@
 /*
- * sha1.c / 2013 Max Burke / Public Domain
+ * mlb_sha1.c / 2013 Max Burke / Public Domain
  *
  * This module provides a SHA1 hash that works on buffers or on strings.
  *
@@ -20,7 +20,7 @@
 #pragma warning(pop)
 #endif
 
-#include "sha1.h"
+#include "mlb_sha1.h"
 
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L
     #define inline
