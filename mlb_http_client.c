@@ -2,12 +2,24 @@
  * http_client.c / 2013 Max Burke / Public Domain
  */
 
+/*
+ * TODO:
+ * Use a linear allocator for the http requests.
+ */
+
 #ifdef _MSC_VER
 #pragma warning(push, 0)
 #endif
 
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
+
+#ifdef _MSC_VER
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#endif
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -21,25 +33,96 @@
 
 #ifdef _MSC_VER
 #define inline __inline
+#define HTTP_ENFORCE(session, x, y) \
+    if ((x))\
+    { \
+        int error; \
+        const char *error_string; \
+        error = WSAGetLastError(); \
+        error_string = http_get_error_string(error); \
+        if (session->error) \
+        { \
+            session->error(error_string); \
+        } \
+        else \
+        { \
+            fprintf(stderr, "[http] error: %s\n", error_string); \
+        } \
+        return y; \
+    }
+
+static const char *
+http_get_error_string(int error)
+{
+    char *error_string;
+    
+    FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL,
+            error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)&error_string,
+            0,
+            NULL);
+
+    if (!error_string)
+    {
+        return " -- ERROR -- Unable to retrieve system error message";
+    }
+
+    return error_string;
+}
+
+#endif
+
+#ifndef _MSC_VER
+    typedef int SOCKET;
+    #define closesocket close
 #endif
 
 static const char http_user_agent[] = "User-Agent: mlbhttp/1.0\x0d\x0a";
+static int http_initialized;
 
 struct http_request_handle_t
 {
     struct http_session_t *session;
-    const char *url;
+    struct http_url_t url;
     enum http_method_t method;
     const char *content_type;
     size_t content_body_size;
     const char *content_body;
+
+    
+    SOCKET request_socket;
 };
 
 struct http_session_t
 {
     http_alloc_fn alloc;
     http_free_fn free;
+    http_error_fn error;
 };
+
+static void
+http_initialize(void)
+{
+#ifdef _MSC_VER
+    WSADATA wsa_data;
+    int result;
+
+    if (http_initialized)
+    {
+        return;
+    }
+
+    memset(&wsa_data, 0, sizeof wsa_data);
+    result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
+
+    assert(result == 0);
+
+    http_initialized = 1;
+#endif
+}
 
 struct http_session_t *
 http_session_create(struct http_session_parameters_t *session_parameters)
@@ -51,6 +134,9 @@ http_session_create(struct http_session_parameters_t *session_parameters)
     session = session_parameters->alloc(sizeof(struct http_session_t));
     session->alloc = session_parameters->alloc;
     session->free = session_parameters->free;
+    session->error = session_parameters->error;
+
+    http_initialize();
 
     return session;
 }
@@ -161,19 +247,26 @@ http_url_encode_fragment(char *destination, const char *uri)
 }
 
 static const char *
-http_encode_url(struct http_session_t *session, struct http_request_t *request)
+http_add_get_parameters_to_path(struct http_session_t *session, struct http_request_t *request)
 {
     char *encoded_url;
     char *ptr;
     size_t encoded_url_length;
-    size_t base_url_length;
+    size_t original_path_length;
     int i;
     int e;
     struct http_parameter_t *get_parameters;
+    const char *original_path;
 
-    base_url_length = strlen(request->url);
-    encoded_url_length = base_url_length;
+    original_path = request->url.path;
+    original_path_length = strlen(original_path);
+    encoded_url_length = original_path_length;
     get_parameters = request->get_parameters;
+
+    if (request->num_get_parameters == 0)
+    {
+        return original_path;
+    }
 
     for (i = 0, e = request->num_get_parameters; i < e; ++i)
     {
@@ -188,7 +281,8 @@ http_encode_url(struct http_session_t *session, struct http_request_t *request)
     encoded_url = session->alloc(encoded_url_length + 1);
     ptr = encoded_url;
 
-    memmove(ptr, request->url, base_url_length);
+    memmove(ptr, original_path, original_path_length);
+    ptr += original_path_length;
 
     for (i = 0, e = request->num_get_parameters; i < e; ++i)
     {
@@ -201,6 +295,8 @@ http_encode_url(struct http_session_t *session, struct http_request_t *request)
             ptr += http_url_encode_fragment(ptr, get_parameters[i].value);
         }
     }
+
+    *ptr++ = 0;
 
     return encoded_url;
 }
@@ -232,6 +328,93 @@ http_add_post_parameter_to_body(char *buffer, size_t buffer_size, struct http_pa
     return required_size;
 }
 
+static SOCKET
+http_connection_connect(struct http_request_handle_t *request)
+{
+    unsigned short port;
+    struct addrinfo *result;
+    struct addrinfo *i;
+    SOCKET socket_handle;
+    int success;
+
+    socket_handle = 0;
+    success = 0;
+    port = request->url.port;
+    HTTP_ENFORCE(request->session, getaddrinfo(request->url.authority, NULL, NULL, &result) == 0, INVALID_SOCKET);
+
+    for (i = result; i != NULL; i = i->ai_next)
+    {
+        if (i->ai_socktype != SOCK_STREAM)
+        {
+            continue;
+        }
+
+        socket_handle = socket(i->ai_family, i->ai_socktype, i->ai_protocol);
+        HTTP_ENFORCE(request->session, socket_handle != INVALID_SOCKET, INVALID_SOCKET);
+
+        switch (i->ai_addr->sa_family)
+        {
+            case AF_INET:
+                {
+                    struct sockaddr_in *s;
+
+                    s = (struct sockaddr_in *)i->ai_addr;
+                    s->sin_port = htons(port);
+                }
+                break;
+            case AF_INET6:
+                {
+                    struct sockaddr_in6 *s;
+
+                    s = (struct sockaddr_in6 *)i->ai_addr;
+                    s->sin6_port = htons(port);
+                }
+                break;
+            default:
+                assert(0 && "Unknown socket family!");
+                break;
+        }
+
+        if (connect(socket_handle, i->ai_addr, i->ai_addrlen) == 0)
+        {
+            success = 1;
+            break;
+        }
+    }
+
+    freeaddrinfo(result);
+
+    if (!success)
+    {
+        if (socket_handle != 0)
+        {
+            closesocket(socket_handle);
+        }
+
+        return INVALID_SOCKET;
+    }
+
+    return socket_handle;
+}
+
+static int
+http_connection_open(struct http_request_handle_t *request)
+{
+    int port;
+    SOCKET socket_handle;
+
+    socket_handle = http_connection_connect(request);
+
+    if (socket_handle == INVALID_SOCKET)
+    {
+        return 1;
+    }
+
+    port = request->url.port == 0 ? 80 : request->url.port;
+
+    return 0;
+}
+
 struct http_request_handle_t *
 http_request_begin(struct http_session_t *session, struct http_request_t *request)
 {
@@ -243,7 +426,13 @@ http_request_begin(struct http_session_t *session, struct http_request_t *reques
     handle = session->alloc(sizeof(struct http_request_handle_t));
     handle->session = session;
     handle->method = request->method;
-    handle->url = http_encode_url(session, request);
+    handle->url = request->url;
+    handle->url.path = http_add_get_parameters_to_path(session, request);
+
+    if (http_connection_open(handle))
+    {
+        return NULL;
+    }
 
     return handle;
 }

@@ -66,11 +66,13 @@ struct http_session_t;
 
 typedef void *(*http_alloc_fn)(size_t size);
 typedef void (*http_free_fn)(void *ptr);
+typedef void (*http_error_fn)(const char *error_string);
 
 struct http_session_parameters_t
 {
     http_alloc_fn alloc;
     http_free_fn free;
+    http_error_fn error;
 };
 
 struct http_parameter_t
@@ -79,11 +81,17 @@ struct http_parameter_t
     const char *value;
 };
 
+struct http_url_t
+{
+    const char *authority;
+    unsigned short port;
+    const char *path;
+};
+
 struct http_request_t
 {
-    const char *url;
     enum http_method_t method;
-
+    struct http_url_t url;
     int num_get_parameters;
     struct http_parameter_t *get_parameters;
 
@@ -124,6 +132,23 @@ http_session_create(struct http_session_parameters_t *session_parameters);
  */
 size_t
 http_add_post_parameter_to_body(char *buffer, size_t buffer_size, struct http_parameter_t parameter);
+
+/*
+ * Creates a URL object from a URL string. This URL object will be allocated
+ * on the heap and has to be destroyed with the http_url_destroy function
+ * below. The URL objects do not have to be heap allocated, you may create
+ * them on the stack and populate the individual components by hand however
+ * the lifetime of the URL object components must be greater than the lifetime
+ * of the request.
+ */
+struct http_url_t *
+http_url_create(struct http_session_t *session, const char *url_string);
+
+/*
+ * Destroy a URL object, releasing any resources it is holding.
+ */
+void
+http_url_destroy(struct http_session_t *session, struct http_url_t *url);
 
 /*
  * Initiate a request as detailed by the given http_request_t object.
