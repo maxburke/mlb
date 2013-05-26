@@ -1,11 +1,11 @@
 /*
- * arg_parse.c / 2013 Max Burke / Public Domain
+ * mlb_arg_parse.c / 2013 Max Burke / Public Domain
  */
 
 #include <assert.h>
-#include <stddef.h>
 #include <string.h>
-#include "arg_parse.h"
+
+#include "mlb_arg_parse.h"
 
 static int
 is_short_arg(const char *a)

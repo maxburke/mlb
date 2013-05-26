@@ -1,9 +1,11 @@
 /*
- * arg_parse.h / 2013 Max Burke / Public Domain
+ * mlb_arg_parse.h / 2013 Max Burke / Public Domain
  */
 
-#ifndef ARG_PARSE_H
-#define ARG_PARSE_H
+#ifndef MLB_ARG_PARSE_H
+#define MLB_ARG_PARSE_H
+
+#include <stddef.h>
 
 enum mlb_arg_type_t
 {
