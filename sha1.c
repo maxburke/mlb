@@ -118,8 +118,8 @@ initialize_last_chunk(char last_chunk[128], const void *data, size_t length)
     return 1;
 }
 
-static inline struct sha1_hash_t
-hash_chunk(struct sha1_hash_t h, const void *mem)
+static inline struct mlb_sha1_hash_t
+hash_chunk(struct mlb_sha1_hash_t h, const void *mem)
 {
     uint32_t buf[80];
     int i;
@@ -209,13 +209,13 @@ hash_chunk(struct sha1_hash_t h, const void *mem)
     return h;
 }
 
-struct sha1_hash_t
-sha1_hash_buffer(const void *data, size_t length)
+struct mlb_sha1_hash_t
+mlb_sha1_hash_buffer(const void *data, size_t length)
 {
     char last_chunk[128];
     const char *string;
     size_t i;
-    struct sha1_hash_t rv;
+    struct mlb_sha1_hash_t rv;
     size_t num_chunks;
     size_t num_extra_chunks;
 
@@ -247,9 +247,9 @@ sha1_hash_buffer(const void *data, size_t length)
     return rv;
 }
 
-struct sha1_hash_t
-sha1_hash_string(const char *string)
+struct mlb_sha1_hash_t
+mlb_sha1_hash_string(const char *string)
 {
-    return sha1_hash_buffer(string, strlen(string));
+    return mlb_sha1_hash_buffer(string, strlen(string));
 }
 

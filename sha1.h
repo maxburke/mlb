@@ -9,16 +9,16 @@
 
 #include <stdint.h>
 
-struct sha1_hash_t
+struct mlb_sha1_hash_t
 {
     uint32_t h[5];
 };
 
-struct sha1_hash_t
-sha1_hash_buffer(const void *data, size_t length);
+struct mlb_sha1_hash_t
+mlb_sha1_hash_buffer(const void *data, size_t length);
 
-struct sha1_hash_t
-sha1_hash_string(const char *string);
+struct mlb_sha1_hash_t
+mlb_sha1_hash_string(const char *string);
 
 #endif
 
