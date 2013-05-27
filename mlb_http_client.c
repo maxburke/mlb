@@ -1,5 +1,5 @@
 /*
- * http_client.c / 2013 Max Burke / Public Domain
+ * mlb_http_client.c / 2013 Max Burke / Public Domain
  */
 
 /*
@@ -25,7 +25,7 @@
 #pragma warning(pop)
 #endif
 
-#include "http_client.h"
+#include "mlb_http_client.h"
 
 #ifndef UNUSED
 #define UNUSED(x) (void)x
@@ -34,7 +34,7 @@
 #ifdef _MSC_VER
 #define inline __inline
 #define HTTP_ENFORCE(session, x, y) \
-    if ((x))\
+    if (!(x))\
     { \
         int error; \
         const char *error_string; \
@@ -344,11 +344,6 @@ http_connection_connect(struct http_request_handle_t *request)
 
     for (i = result; i != NULL; i = i->ai_next)
     {
-        if (i->ai_socktype != SOCK_STREAM)
-        {
-            continue;
-        }
-
         socket_handle = socket(i->ai_family, i->ai_socktype, i->ai_protocol);
         HTTP_ENFORCE(request->session, socket_handle != INVALID_SOCKET, INVALID_SOCKET);
 

@@ -1,5 +1,5 @@
 /*
- * http_client.h / 2013 Max Burke / Public Domain
+ * mlb_http_client.h / 2013 Max Burke / Public Domain
  */
 
 #ifndef MLB_HTTP_CLIENT_H

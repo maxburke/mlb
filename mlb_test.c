@@ -4,6 +4,7 @@
 
 #include "mlb_arg_parse.h"
 #include "mlb_sha1.h"
+#include "mlb_http_client.h"
 
 /*
  * Normally my coding style has the standard include files come before the
@@ -12,11 +13,14 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int arg_tests_failed;
+int http_tests_failed;
 
 #define ARG_TEST_ASSERT(cond) if (!(cond)) { printf("%s(%d): FAILED - %s\n", __FILE__, __LINE__, #cond); ++arg_tests_failed; } else (void)0
+#define HTTP_TEST_ASSERT(cond) if (!(cond)) { printf("%s(%d): FAILED - %s\n", __FILE__, __LINE__, #cond); ++http_tests_failed; } else (void)0
 
 static void
 parameter_callback(void *context, const struct mlb_arg_t *arg, const char *value)
@@ -135,6 +139,50 @@ test_sha1(void)
 
     return result;
 }
+
+static void
+http_error(const char *string)
+{
+    printf("%s", string);
+}
+
+static int
+test_http(void)
+{
+    struct http_session_parameters_t session_parameters;
+    struct http_session_t *session;
+    struct http_url_t url;
+    struct http_request_t request;
+    struct http_request_handle_t *handle;
+    struct http_result_t result;
+
+    session_parameters.alloc = malloc;
+    session_parameters.free = free;
+    session_parameters.error = http_error;
+
+    session = http_session_create(&session_parameters);
+    HTTP_TEST_ASSERT(session != NULL);
+
+    url.authority = "www.google.ca";
+    url.port = 80;
+    url.path = "/";
+
+    request.method = HTTP_GET;
+    request.url = url;
+    request.num_get_parameters = 0;
+    request.get_parameters = 0;
+    request.content_type = "text/html";
+    request.content_body_length = 0;
+    request.content_body = "";
+
+    handle = http_request_begin(session, &request);
+    http_request_wait(handle, &result);
+
+    http_request_end(handle);
+    http_session_destroy(session);
+
+    return 0;
+}
     
 int
 main(void)
@@ -143,6 +191,7 @@ main(void)
 
     tests_failed  = test_arg_parse();
     tests_failed += test_sha1();
+    tests_failed += test_http();
 
     printf("%d tests failed", tests_failed);
     return tests_failed;
