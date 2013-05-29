@@ -78,10 +78,21 @@ http_get_error_string(int error)
 #ifndef _MSC_VER
     typedef int SOCKET;
     #define closesocket close
+    #define ioctlsocket ioctl
 #endif
 
 static const char http_user_agent[] = "User-Agent: mlbhttp/1.0\x0d\x0a";
 static int http_initialized;
+
+enum http_request_state_t
+{
+    HTTP_REQUEST_STATE_INITIAL,
+    HTTP_REQUEST_STATE_READING_HEADER,
+    HTTP_REQUEST_STATE_READING_BODY,
+    HTTP_REQUEST_STATE_COMPLETE
+};
+
+#define HEADER_BUFFER_SIZE 4096
 
 struct http_request_handle_t
 {
@@ -92,7 +103,18 @@ struct http_request_handle_t
     size_t content_body_size;
     const char *content_body;
 
-    
+    enum http_request_state_t state;
+    size_t idx;
+
+    char *header_buffer;
+    size_t header_buffer_size;
+
+    char *response_body;
+    size_t response_body_size;
+
+    char *response_content_type;
+    enum http_result_code_t result;
+
     SOCKET request_socket;
 };
 
@@ -406,8 +428,87 @@ http_connection_open(struct http_request_handle_t *request)
     }
 
     port = request->url.port == 0 ? 80 : request->url.port;
+    request->request_socket = socket_handle;
 
     return 0;
+}
+
+static void
+http_request_send_method(struct http_request_handle_t *handle)
+{
+    static const char *method_strings[] = 
+    {
+        "GET ",
+        "POST ",
+        "PUT ",
+        "DELETE "
+    };
+
+    static const int method_string_lengths[] = 
+    {
+        4,
+        5,
+        4,
+        7
+    };
+
+    enum http_method_t method;
+
+    method = handle->method;
+    assert(method >= HTTP_GET && method < HTTP_NUM_METHODS);
+
+    send(handle->request_socket, method_strings[method], method_string_lengths[method], 0);
+}
+
+static void
+http_request_send_request(struct http_request_handle_t *handle)
+{
+    static const char http_version_string[] = " HTTP/1.1\x0d\x0a";
+    static const char host_string[] = "Host: ";
+    static const char new_line_string[] = "\x0d\x0a";
+    SOCKET socket_handle;
+
+    #define send_string(s) send(socket_handle, s, (sizeof s) - 1, 0)
+
+    socket_handle = handle->request_socket;
+
+    http_request_send_method(handle);
+    send(socket_handle, handle->url.path, strlen(handle->url.path), 0);
+    send_string(http_version_string);
+    send_string(host_string);
+    send(socket_handle, handle->url.authority, strlen(handle->url.authority), 0);
+    send_string(new_line_string);
+    send(socket_handle, new_line_string, (sizeof new_line_string) - 1, 0);
+
+    if (handle->content_body_size > 0)
+    {
+        static const char content_type_string[] = "Content-Type: ";
+        static const char content_length_string[] = "Content-Length: ";
+
+        const char *content_type;
+        size_t content_length;
+        char digits[22];
+
+        content_type = handle->content_type;
+        content_length = handle->content_body_size;
+
+        send_string(content_type_string);
+        send(socket_handle, content_type, strlen(content_type), 0);
+        send_string(new_line_string);
+        send_string(content_length_string);
+    
+        memset(digits, 0, sizeof digits);
+        sprintf(digits, "%ul", content_length);
+        send(socket_handle, digits, strlen(digits), 0);
+        send_string(new_line_string);
+        send_string(new_line_string);
+
+        send(socket_handle, handle->content_body, content_length, 0);
+    }
+    else
+    {
+        send_string(new_line_string);
+    }
 }
 
 struct http_request_handle_t *
@@ -429,17 +530,22 @@ http_request_begin(struct http_session_t *session, struct http_request_t *reques
         return NULL;
     }
 
+    http_request_send_request(handle);
     return handle;
 }
 
 void
 http_request_wait(struct http_request_handle_t *request, struct http_result_t *result)
 {
-    assert(request != NULL);
-    assert(result != NULL);
+    while (http_request_iterate(request, result) == 0)
+        ;
+}
 
-    UNUSED(request);
-    UNUSED(result);
+static void
+http_parse_header(struct http_request_handle_t *request)
+{
+    (void)request;
+    assert(0 && "hello");
 }
 
 int
@@ -448,8 +554,72 @@ http_request_iterate(struct http_request_handle_t *request, struct http_result_t
     assert(request != NULL);
     assert(result != NULL);
 
-    UNUSED(request);
-    UNUSED(result);
+    switch (request->state)
+    {
+        case HTTP_REQUEST_STATE_INITIAL:
+            {
+                request->header_buffer_size = 0;
+                request->state = HTTP_REQUEST_STATE_READING_HEADER;
+                request->idx = 0;
+            }
+        case HTTP_REQUEST_STATE_READING_HEADER:
+            {
+                unsigned long data_pending_size;
+                SOCKET socket_handle;
+                int bytes_read;
+                size_t current_position;
+                static const char end_of_header[] = "\x0d\x0a\x0d\x0a";
+
+                socket_handle = request->request_socket;
+                current_position = request->idx;
+                ioctlsocket(socket_handle, FIONREAD, &data_pending_size);
+
+                if (data_pending_size == 0)
+                {
+                    return 0;
+                }
+
+                if (data_pending_size + current_position > request->header_buffer_size)
+                {
+                    size_t new_header_buffer_size;
+                    void *new_header_buffer;
+
+                    new_header_buffer_size = request->header_buffer_size + HEADER_BUFFER_SIZE;
+                    new_header_buffer = request->session->alloc(new_header_buffer_size);
+
+                    memset(new_header_buffer, 0, new_header_buffer_size);
+                    request->header_buffer_size = new_header_buffer_size;
+                    request->header_buffer = new_header_buffer;
+                }
+
+                bytes_read = recv(socket_handle, request->header_buffer + current_position, data_pending_size, 0);
+                assert(bytes_read >= 0 && (size_t)bytes_read == data_pending_size);
+
+                if (strstr(request->header_buffer, end_of_header) == NULL)
+                {
+                    return 0;
+                }
+
+                http_parse_header(request);
+            }
+            break;
+        case HTTP_REQUEST_STATE_READING_BODY:
+            {
+                assert(0 && "TODO");
+            }
+            break;
+        case HTTP_REQUEST_STATE_COMPLETE:
+            {
+                result->result = request->result;
+                result->response_body_size = request->response_body_size;
+                result->response_body = request->response_body;
+                result->content_type = request->response_content_type;
+                return 1;
+            }
+        default:
+            assert(0 && "Unknown request state!");
+            break;
+    }
 
     return 0;
 }

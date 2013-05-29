@@ -12,7 +12,8 @@ enum http_method_t
     HTTP_GET,
     HTTP_POST,
     HTTP_PUT,
-    HTTP_DELETE
+    HTTP_DELETE,
+    HTTP_NUM_METHODS
 };
 
 enum http_result_code_t
@@ -103,8 +104,8 @@ struct http_request_t
 struct http_result_t
 {
     enum http_result_code_t result;
-    size_t data_size;
-    char *data;
+    size_t response_body_size;
+    char *response_body;
     char *content_type;
 };
 
@@ -174,6 +175,9 @@ http_request_wait(struct http_request_handle_t *request, struct http_result_t *r
  */
 int
 http_request_iterate(struct http_request_handle_t *request, struct http_result_t *result);
+
+void
+http_result_destroy(struct http_result_t *result);
 
 /*
  * Dispose of the request handle after the request has finished.
