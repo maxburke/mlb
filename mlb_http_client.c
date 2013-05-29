@@ -3,8 +3,7 @@
  */
 
 /*
- * TODO:
- * Use a linear allocator for the http requests.
+ * Fair warning, this file is still very much under construction.
  */
 
 #ifdef _MSC_VER
