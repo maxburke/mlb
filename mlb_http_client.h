@@ -59,19 +59,25 @@ enum http_result_code_t
     HTTP_BAD_GATEWAY = 502,
     HTTP_SERVICE_UNAVAILABLE = 503,
     HTTP_GATEWAY_TIME_OUT = 504,
-    HTTP_VERSION_NOT_SUPPORTED = 505
+    HTTP_VERSION_NOT_SUPPORTED = 505,
+
+    /*
+     * These error codes are raised by the library if something bad happens 
+     * while processing the request
+     */
+    HTTP_BAD_HEADERS = -1
 };
 
 struct http_request_handle_t;
 struct http_session_t;
 
-typedef void *(*http_alloc_fn)(size_t size);
+typedef void *(*http_realloc_fn)(void *ptr, size_t size);
 typedef void (*http_free_fn)(void *ptr);
 typedef void (*http_error_fn)(const char *error_string);
 
 struct http_session_parameters_t
 {
-    http_alloc_fn alloc;
+    http_realloc_fn realloc;
     http_free_fn free;
     http_error_fn error;
 };
@@ -103,8 +109,8 @@ struct http_request_t
 
 struct http_result_t
 {
-    enum http_result_code_t result;
-    size_t response_body_size;
+    enum http_result_code_t result_code;
+    size_t response_body_length;
     char *response_body;
     char *content_type;
 };
@@ -159,9 +165,12 @@ http_request_begin(struct http_session_t *session, struct http_request_t *reques
 
 /*
  * Performs a blocking wait for the completion of the request. This function
- * must have been passed the address of a valid http_result_t structure.
+ * must have been passed the address of a valid http_result_t structure. 
+ *
+ * Returns 0 if the request was successful, -1 if there was an error relating
+ * to the request (ie: not a 4xx/5xx error).
  */
-void
+int
 http_request_wait(struct http_request_handle_t *request, struct http_result_t *result);
 
 /*
@@ -171,7 +180,9 @@ http_request_wait(struct http_request_handle_t *request, struct http_result_t *r
  * request. If the request has not completed, the result structure will be 
  * zeroed.
  *
- * Returns 0 if the request has not yet completed or 1 if it has.
+ * Returns 0 if the request has not yet completed or 1 if it has. If an error
+ * has happened relating to the request (ie: not a 4xx/5xx error), this function
+ * will return -1.
  */
 int
 http_request_iterate(struct http_request_handle_t *request, struct http_result_t *result);

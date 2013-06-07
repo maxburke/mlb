@@ -91,7 +91,8 @@ enum http_request_state_t
     HTTP_REQUEST_STATE_COMPLETE
 };
 
-#define HEADER_BUFFER_SIZE 4096
+#define HTTP_HEADER_BUFFER_SIZE_MULTIPLE 4096
+#define HTTP_BODY_LENGTH_UNKNOWN ~(size_t)0
 
 struct http_request_handle_t
 {
@@ -99,30 +100,39 @@ struct http_request_handle_t
     struct http_url_t url;
     enum http_method_t method;
     const char *content_type;
-    size_t content_body_size;
+    size_t content_body_length;
     const char *content_body;
 
     enum http_request_state_t state;
     size_t idx;
 
     char *header_buffer;
-    size_t header_buffer_size;
+    size_t header_buffer_length;
+    size_t header_buffer_alloc_size;
 
     char *response_body;
-    size_t response_body_size;
+    size_t response_body_length;
+    size_t response_body_alloc_size;
 
     char *response_content_type;
-    enum http_result_code_t result;
+    enum http_result_code_t result_code;
 
     SOCKET request_socket;
 };
 
 struct http_session_t
 {
-    http_alloc_fn alloc;
+    http_realloc_fn realloc;
     http_free_fn free;
     http_error_fn error;
 };
+
+static size_t
+http_align_up(size_t value, size_t boundary)
+{
+    assert((boundary & (boundary - 1)) == 0);
+    return (value + boundary - 1) & ~(boundary - 1);
+}
 
 static void
 http_initialize(void)
@@ -152,8 +162,8 @@ http_session_create(struct http_session_parameters_t *session_parameters)
 
     assert(session_parameters != NULL);
 
-    session = session_parameters->alloc(sizeof(struct http_session_t));
-    session->alloc = session_parameters->alloc;
+    session = session_parameters->realloc(NULL, sizeof(struct http_session_t));
+    session->realloc = session_parameters->realloc;
     session->free = session_parameters->free;
     session->error = session_parameters->error;
 
@@ -163,7 +173,7 @@ http_session_create(struct http_session_parameters_t *session_parameters)
 }
 
 static inline int
-must_percent_encode(char c)
+http_must_percent_encode(char c)
 {
     return !(((c >= 'A') && (c <= 'Z')) 
         || ((c >= 'a') && (c <= 'z'))
@@ -244,7 +254,7 @@ http_url_encode_fragment(char *destination, const char *uri)
             *destination++ = '+';
             ++i;
         }
-        else if (must_percent_encode(c))
+        else if (http_must_percent_encode(c))
         {
             int low_nybble;
             int high_nybble;
@@ -299,7 +309,7 @@ http_add_get_parameters_to_path(struct http_session_t *session, struct http_requ
         }
     }
 
-    encoded_url = session->alloc(encoded_url_length + 1);
+    encoded_url = session->realloc(NULL, encoded_url_length + 1);
     ptr = encoded_url;
 
     memmove(ptr, original_path, original_path_length);
@@ -423,7 +433,7 @@ http_connection_open(struct http_request_handle_t *request)
 
     if (socket_handle == INVALID_SOCKET)
     {
-        return 1;
+        return -1;
     }
 
     port = request->url.port == 0 ? 80 : request->url.port;
@@ -479,7 +489,7 @@ http_request_send_request(struct http_request_handle_t *handle)
     send_string(new_line_string);
     send(socket_handle, new_line_string, (sizeof new_line_string) - 1, 0);
 
-    if (handle->content_body_size > 0)
+    if (handle->content_body_length > 0)
     {
         static const char content_type_string[] = "Content-Type: ";
         static const char content_length_string[] = "Content-Length: ";
@@ -489,7 +499,7 @@ http_request_send_request(struct http_request_handle_t *handle)
         char digits[22];
 
         content_type = handle->content_type;
-        content_length = handle->content_body_size;
+        content_length = handle->content_body_length;
 
         send_string(content_type_string);
         send(socket_handle, content_type, strlen(content_type), 0);
@@ -518,13 +528,18 @@ http_request_begin(struct http_session_t *session, struct http_request_t *reques
     assert(session != NULL);
     assert(request != NULL);
 
-    handle = session->alloc(sizeof(struct http_request_handle_t));
+    handle = session->realloc(NULL, sizeof(struct http_request_handle_t));
+    memset(handle, 0, sizeof(struct http_request_handle_t));
+
     handle->session = session;
     handle->method = request->method;
     handle->url = request->url;
     handle->url.path = http_add_get_parameters_to_path(session, request);
+    handle->content_type = request->content_type;
+    handle->content_body_length = request->content_body_length;
+    handle->content_body = request->content_body;
 
-    if (http_connection_open(handle))
+    if (http_connection_open(handle) != 0)
     {
         return NULL;
     }
@@ -533,18 +548,230 @@ http_request_begin(struct http_session_t *session, struct http_request_t *reques
     return handle;
 }
 
-void
-http_request_wait(struct http_request_handle_t *request, struct http_result_t *result)
+int
+http_request_wait(struct http_request_handle_t *request, struct http_result_t *http_result)
 {
-    while (http_request_iterate(request, result) == 0)
+    int result;
+
+    while ((result = http_request_iterate(request, http_result)) == 0)
         ;
+
+    assert(result == 0 || result == -1);
+    return result;
 }
 
-static void
+static int
+http_parse_result_code(struct http_request_handle_t *request)
+{
+    static const char protocol_prefix[] = "HTTP/1.1 ";
+    const char *header_buffer;
+    const char *prefix_start;
+    const char *status_code_start;
+    long result_code;
+
+    header_buffer = request->header_buffer;
+    /*
+     * HTTP 1.0 and HTTP 1.1 both have the same length prefix before the status
+     * code.
+     */
+    prefix_start = strstr(header_buffer, protocol_prefix);
+    if (prefix_start == NULL)
+    {
+        return -1;
+    }
+
+    status_code_start = prefix_start + sizeof(protocol_prefix) - 1;
+    result_code = strtol(status_code_start, NULL, 0);
+    request->result_code = (enum http_result_code_t)result_code;
+
+    return 0;
+}
+
+static int
+http_parse_content_length(struct http_request_handle_t *request)
+{
+    static const char content_length_prefix[] = "Content-Length: ";
+    const char *content_length_prefix_start;
+    const char *content_length_start;
+    unsigned long content_length;
+
+    content_length_prefix_start = strstr(request->header_buffer, content_length_prefix);
+    if (content_length_prefix_start == NULL)
+    {
+        return -1;
+    }
+
+    content_length_start = content_length_prefix_start + sizeof(content_length_prefix) - 1;
+    content_length = strtoul(content_length_start, NULL, 0);
+    request->response_body_length = content_length;
+
+    return 0;
+}
+#if 0
+static int
+http_prepare_content_type_and_body_buffer(struct http_request_handle_t *request)
+{
+    static const char content_type_prefix[] = "Content-Type: ";
+    static const char newline[] = "\x0d\x0a";
+    const char *content_type_prefix_start;
+    const char *newline_end;
+    const char *content_type_start;
+    size_t content_type_length;
+    size_t content_type_alloc_size;
+    size_t body_buffer_size;
+    char *body_buffer;
+
+    content_type_prefix_start = strstr(request->header_buffer, content_type_prefix);
+    if (content_type_prefix_start == NULL)
+    {
+        return -1;
+    }
+
+    newline_end = strstr(content_type_prefix_start, newline);
+    if (newline_end == NULL)
+    {
+        return -1;
+    }
+
+    content_type_start = content_type_prefix_start + sizeof(content_type_prefix) - 1;
+    assert(newline_end >= content_type_start);
+
+    content_type_length = (size_t)(newline_end - content_type_start);
+    content_type_alloc_size = http_align_up(content_type_length + 1, sizeof(void *));
+    body_buffer_size = request->response_body_length + content_type_alloc_size + 1;
+    body_buffer = request->session->realloc(NULL, body_buffer_size);
+    memset(body_buffer, 0, body_buffer_size);
+
+    memcpy(body_buffer, content_type_start, content_type_length);
+
+    request->response_content_type = body_buffer;
+    request->response_body = body_buffer + content_type_alloc_size;
+
+    return 0;
+}
+#endif
+static int
+http_prepare_content_type(struct http_request_handle_t *request)
+{
+    static const char content_type_prefix[] = "Content-Type: ";
+    static const char newline[] = "\x0d\x0a";
+    const char *content_type_prefix_start;
+    const char *newline_end;
+    const char *content_type_start;
+    ptrdiff_t content_type_length;
+    char *content_type;
+
+    content_type_prefix_start = strstr(request->header_buffer, content_type_prefix);
+    if (content_type_prefix_start == NULL)
+    {
+        return -1;
+    }
+
+    newline_end = strstr(content_type_prefix_start, newline);
+    if (newline_end == NULL)
+    {
+        return -1;
+    }
+
+    content_type_start = content_type_prefix_start + sizeof(content_type_prefix) - 1;
+    assert(newline_end >= content_type_start);
+
+    content_type_length = newline_end - content_type_start;
+    assert(content_type_length > 0);
+
+    /*
+     * Extra byte for null termination.
+     */
+    content_type = request->session->realloc(NULL, (size_t)content_type_length + 1);
+    memcpy(content_type, content_type_start, content_type_length);
+    content_type[content_type_length] = 0;
+
+    request->response_content_type = content_type;
+    return 0;
+}
+
+static int
+http_prepare_body_buffer(struct http_request_handle_t *request)
+{
+    static const char header_terminator_prefix[] = "\x0d\x0a\x0d\x0a";
+    size_t header_buffer_length;
+    ptrdiff_t body_data_received;
+    size_t response_body_length;
+    size_t response_body_alloc_size;
+    const char *header_buffer;
+    const char *header_end;
+    const char *body_begin;
+    char *response_body;
+
+    header_buffer = request->header_buffer;
+    header_buffer_length = request->header_buffer_length;
+
+    header_end = strstr(header_buffer, header_terminator_prefix);
+    if (header_end == NULL)
+    {
+        return -1;
+    }
+
+    body_begin = header_end + sizeof(header_terminator_prefix) - 1;
+    body_data_received = (header_buffer + header_buffer_length) - body_begin;
+    assert(body_data_received >= 0);
+
+    response_body_length = request->response_body_length;
+    if (response_body_length != HTTP_BODY_LENGTH_UNKNOWN)
+    {
+        /*
+         * If we did receive a Content-Length header, pre-allocate the buffer
+         * and copy any data we have received so far into it.
+         */
+
+        response_body_alloc_size = response_body_length + 1;
+    }
+    else
+    {
+        response_body_alloc_size = http_align_up(body_data_received + 1, HTTP_HEADER_BUFFER_SIZE_MULTIPLE);
+    }
+
+    response_body = request->session->realloc(NULL, response_body_alloc_size);
+    memcpy(response_body, body_begin, body_data_received);
+    response_body[body_data_received] = 0;
+    response_body[response_body_alloc_size - 1] = 0;
+
+    request->idx = body_data_received;
+    request->response_body_alloc_size = response_body_alloc_size;
+    request->response_body = response_body;
+
+    return 0;
+}
+
+static int
 http_parse_header(struct http_request_handle_t *request)
 {
-    (void)request;
-    assert(0 && "hello");
+    if (http_parse_result_code(request) != 0)
+    {
+        return -1;
+    }
+
+    if (http_parse_content_length(request) != 0)
+    {
+        /*
+         * Content-Length headers may not be present if keepalive is disabled,
+         * so in these cases we have to just keep reading until the connection
+         * is closed by the remote host.
+         */
+        request->response_body_length = HTTP_BODY_LENGTH_UNKNOWN;
+    }
+
+    if (http_prepare_content_type(request) != 0)
+    {
+        return -1;
+    }
+
+    if (http_prepare_body_buffer(request) != 0)
+    {
+        return -1;
+    }
+
+    return 0;
 }
 
 int
@@ -557,7 +784,8 @@ http_request_iterate(struct http_request_handle_t *request, struct http_result_t
     {
         case HTTP_REQUEST_STATE_INITIAL:
             {
-                request->header_buffer_size = 0;
+                request->header_buffer_length = 0;
+                request->header_buffer_alloc_size = 0;
                 request->state = HTTP_REQUEST_STATE_READING_HEADER;
                 request->idx = 0;
             }
@@ -566,51 +794,122 @@ http_request_iterate(struct http_request_handle_t *request, struct http_result_t
                 unsigned long data_pending_size;
                 SOCKET socket_handle;
                 int bytes_read;
+                int ioctl_result;
                 size_t current_position;
                 static const char end_of_header[] = "\x0d\x0a\x0d\x0a";
 
                 socket_handle = request->request_socket;
                 current_position = request->idx;
-                ioctlsocket(socket_handle, FIONREAD, &data_pending_size);
+                ioctl_result = ioctlsocket(socket_handle, FIONREAD, &data_pending_size);
 
                 if (data_pending_size == 0)
                 {
                     return 0;
                 }
 
-                if (data_pending_size + current_position > request->header_buffer_size)
+                if (ioctl_result != 0)
                 {
-                    size_t new_header_buffer_size;
-                    void *new_header_buffer;
+                    assert(0 && "This shouldn't fail...");
+                    return -1;
+                }
 
-                    new_header_buffer_size = request->header_buffer_size + HEADER_BUFFER_SIZE;
-                    new_header_buffer = request->session->alloc(new_header_buffer_size);
+                if (data_pending_size + current_position + 1 > request->header_buffer_alloc_size)
+                {
+                    size_t new_header_buffer_alloc_size;
+                    char *new_header_buffer;
 
-                    memset(new_header_buffer, 0, new_header_buffer_size);
-                    request->header_buffer_size = new_header_buffer_size;
+                    new_header_buffer_alloc_size = request->header_buffer_alloc_size + 
+                        http_align_up(data_pending_size, HTTP_HEADER_BUFFER_SIZE_MULTIPLE);
+                    new_header_buffer = request->session->realloc(request->header_buffer, new_header_buffer_alloc_size);
+
+                    memset(new_header_buffer + current_position, 0, new_header_buffer_alloc_size - current_position);
+                    request->header_buffer_alloc_size = new_header_buffer_alloc_size;
                     request->header_buffer = new_header_buffer;
                 }
 
                 bytes_read = recv(socket_handle, request->header_buffer + current_position, data_pending_size, 0);
-                assert(bytes_read >= 0 && (size_t)bytes_read == data_pending_size);
+                assert(bytes_read >= 0 && (unsigned long)bytes_read == data_pending_size);
+
+                request->header_buffer_length += bytes_read;
+                request->idx += bytes_read;
 
                 if (strstr(request->header_buffer, end_of_header) == NULL)
                 {
                     return 0;
                 }
 
-                http_parse_header(request);
+                if (http_parse_header(request) != 0)
+                {
+                    request->result_code = HTTP_BAD_HEADERS;
+                    return -1;
+                }
+
+                request->state = HTTP_REQUEST_STATE_READING_BODY;
             }
-            break;
         case HTTP_REQUEST_STATE_READING_BODY:
             {
-                assert(0 && "TODO");
+                SOCKET socket_handle;
+                int bytes_read;
+                size_t current_position;
+                int ioctl_result;
+                unsigned long data_pending_size;
+
+                socket_handle = request->request_socket;
+                current_position = request->idx;
+                ioctl_result = ioctlsocket(socket_handle, FIONREAD, &data_pending_size);
+
+                assert(ioctl_result == 0);
+
+                if (data_pending_size == 0)
+                {
+                    int error;
+                    socklen_t socket_length;
+                    int connected;
+
+                    error = 0;
+                    socket_length = sizeof(error);
+                    connected = getsockopt(socket_handle, SOL_SOCKET, SO_ERROR, (char *)&error, &socket_length);
+
+                    if (connected != 0)
+                    {
+                        request->state = HTTP_REQUEST_STATE_COMPLETE;
+                    }
+printf("---------------------------------------------------\n***%s***\n\n", request->header_buffer);
+printf("===================================================\n***%s***\n\n", request->response_body);
+                    return 0;
+                }
+
+                if (data_pending_size + current_position + 1 > request->response_body_alloc_size)
+                {
+                    size_t new_response_body_alloc_size;
+                    char *new_response_body;
+                    
+                    new_response_body_alloc_size = request->response_body_alloc_size +
+                        http_align_up(data_pending_size, HTTP_HEADER_BUFFER_SIZE_MULTIPLE);
+                    new_response_body = request->session->realloc(request->response_body, new_response_body_alloc_size);
+
+                    memset(new_response_body + current_position, 0, new_response_body_alloc_size - current_position);
+                    request->response_body_alloc_size = new_response_body_alloc_size;
+                    request->response_body = new_response_body;
+                }
+
+                bytes_read = recv(socket_handle, request->response_body + current_position, data_pending_size, 0);
+                assert(bytes_read > 0 && (unsigned long)bytes_read == data_pending_size);
+
+                request->header_buffer_length += bytes_read;
+                request->idx += bytes_read;
+
+                if (bytes_read > 0)
+                {
+                    return 0;
+                }
+
+                request->state = HTTP_REQUEST_STATE_COMPLETE;
             }
-            break;
         case HTTP_REQUEST_STATE_COMPLETE:
             {
-                result->result = request->result;
-                result->response_body_size = request->response_body_size;
+                result->result_code = request->result_code;
+                result->response_body_length = request->response_body_length;
                 result->response_body = request->response_body;
                 result->content_type = request->response_content_type;
                 return 1;
