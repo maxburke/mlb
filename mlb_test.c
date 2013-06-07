@@ -156,7 +156,7 @@ test_http(void)
     struct http_request_handle_t *handle;
     struct http_result_t result;
 
-    session_parameters.alloc = malloc;
+    session_parameters.realloc = realloc;
     session_parameters.free = free;
     session_parameters.error = http_error;
 
