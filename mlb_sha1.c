@@ -8,7 +8,7 @@
  */
 
 #ifdef _MSC_VER
-#pragma warning(push, 0)
+#   pragma warning(push, 0)
 #endif
 
 #include <assert.h>
@@ -17,13 +17,13 @@
 #include <string.h>
 
 #ifdef _MSC_VER
-#pragma warning(pop)
+#   pragma warning(pop)
 #endif
 
 #include "mlb_sha1.h"
 
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L
-    #define inline
+#   define inline
 #endif
 
 union uint64_to_bytes_t
@@ -32,7 +32,7 @@ union uint64_to_bytes_t
     char bytes[8];
 };
 
-#ifdef LITTLE_ENDIAN
+#if LITTLE_ENDIAN
     static inline uint32_t
     u32_to_big_endian(uint32_t p)
     {
@@ -56,10 +56,8 @@ union uint64_to_bytes_t
             *ptr++ = c8.bytes[(sizeof c8.bytes) - i - 1];
         }
     }
-#endif
-
-#ifdef BIG_ENDIAN
-    #define u32_to_big_endian(x) (x)
+#elif BIG_ENDIAN
+#   define u32_to_big_endian(x) (x)
 
     static inline void
     write_length(char *ptr, uint64_t length)
@@ -75,6 +73,8 @@ union uint64_to_bytes_t
             *ptr++ = c8.bytes[i];
         }
     }
+#else
+#   error Must define either M_LITTLE_ENDIAN to 1 or M_BIG_ENDIAN to 1
 #endif
 
 static inline uint32_t
@@ -163,7 +163,7 @@ hash_chunk(struct mlb_sha1_hash_t h, const void *mem)
     d = h.h[3];
     e = h.h[4];
 
-    #define ITERATE() { \
+#   define ITERATE() { \
         temp = left_rotate_5(a) + f + e + k + buf[i]; \
         e = d; \
         d = c; \
@@ -209,6 +209,129 @@ hash_chunk(struct mlb_sha1_hash_t h, const void *mem)
     return h;
 }
 
+static struct mlb_sha1_hash_t
+mlb_sha1_set_initial_hash_values(void)
+{
+    struct mlb_sha1_hash_t rv;
+
+    rv.h[0] = 0x67452301;
+    rv.h[1] = 0xefcdab89;
+    rv.h[2] = 0x98badcfe;
+    rv.h[3] = 0x10325476;
+    rv.h[4] = 0xc3d2e1f0;
+
+    return rv;
+}
+
+static void
+mlb_sha1_reset_context_buf(struct mlb_sha1_hash_context_t *context)
+{
+    memset(&context->buf[0], 0, sizeof context->buf);
+    context->buf_idx = 0;
+}
+
+void
+mlb_sha1_hash_init(struct mlb_sha1_hash_context_t *context)
+{
+    mlb_sha1_reset_context_buf(context);
+    context->hash = mlb_sha1_set_initial_hash_values();
+}
+
+static size_t
+mlb_sha1_handle_leftover(struct mlb_sha1_hash_context_t *context, const void *data, size_t length)
+{
+    char chunk[64];
+    size_t leftover_bytes;
+    size_t bytes_needed_for_chunk;
+
+    leftover_bytes = context->buf_idx;
+
+    if (leftover_bytes == 0)
+    {
+        return 0;
+    }
+
+    if (leftover_bytes + length < 64)
+    {
+        memcpy(&context->buf[leftover_bytes], data, length);
+        context->buf_idx = leftover_bytes + length;
+
+        return length;
+    }
+
+    assert(leftover_bytes < 64);
+
+    bytes_needed_for_chunk = 64 - leftover_bytes;
+
+    memcpy(&chunk[0], &context->buf[0], leftover_bytes);
+    memcpy(&chunk[leftover_bytes], data, bytes_needed_for_chunk);
+
+    context->hash = hash_chunk(context->hash, chunk);
+
+    mlb_sha1_reset_context_buf(context);
+
+    return bytes_needed_for_chunk;
+}
+
+void
+mlb_sha1_hash_update(struct mlb_sha1_hash_context_t *context, const void *data, size_t length)
+{
+    size_t i;
+    size_t num_chunks;
+    size_t leftover_bytes;
+    size_t remainder;
+    struct mlb_sha1_hash_t hash;
+    const char *string;
+
+    string = data;
+    leftover_bytes = mlb_sha1_handle_leftover(context, data, length);
+    hash = context->hash;
+
+    string += leftover_bytes;
+    length -= leftover_bytes;
+
+    if (length == 0)
+    {
+        return;
+    }
+
+    num_chunks = length / 64;
+    remainder = length & 63;
+
+    for (i = 0; i < num_chunks; ++i)
+    {
+        hash = hash_chunk(hash, string);
+        string += 64;
+    }
+
+    memcpy(&context->buf[0], string, remainder);
+    context->buf_idx = remainder;
+}
+
+struct mlb_sha1_hash_t
+mlb_sha1_hash_finalize(struct mlb_sha1_hash_context_t *context)
+{
+    const char *string;
+    char last_chunk[128];
+    size_t i;
+    size_t num_extra_chunks;
+    struct mlb_sha1_hash_t rv;
+
+    memset(last_chunk, 0, sizeof(last_chunk));
+
+    rv = context->hash;
+    string = last_chunk;
+    num_extra_chunks = initialize_last_chunk(last_chunk, context->buf, context->buf_idx);
+
+    for (i = 0; i < num_extra_chunks; ++i)
+    {
+        rv = hash_chunk(rv, string);
+        string += 64;
+    }
+
+    return rv;
+}
+
 struct mlb_sha1_hash_t
 mlb_sha1_hash_buffer(const void *data, size_t length)
 {
@@ -221,11 +344,7 @@ mlb_sha1_hash_buffer(const void *data, size_t length)
 
     string = data;
 
-    rv.h[0] = 0x67452301;
-    rv.h[1] = 0xefcdab89;
-    rv.h[2] = 0x98badcfe;
-    rv.h[3] = 0x10325476;
-    rv.h[4] = 0xc3d2e1f0;
+    rv = mlb_sha1_set_initial_hash_values();
 
     num_chunks = length / 64;
     memset(last_chunk, 0, sizeof last_chunk);
