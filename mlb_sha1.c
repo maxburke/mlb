@@ -104,7 +104,7 @@ initialize_last_chunk(char last_chunk[128], const void *data, size_t length)
     ptr = data;
     remainder = length & 63;
     memmove(last_chunk, ptr + (length & (~63)), remainder);
-    last_chunk[remainder] = 0x80;
+    last_chunk[remainder] = (char)0x80;
 
     if (remainder >= 55)
     {
